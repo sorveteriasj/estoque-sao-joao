@@ -25,6 +25,8 @@ var state = {
   cfgTab:"localizacao",
   movSelected:null,     // codigo currently chosen in mov form
   movTipo:"entrada",
+  prodFamily:null,      // família aberta no kanban (null = tela de escolha, '*' = todas)
+  gest:{ periodo:'hoje', de:'', ate:'', fam:'*' },
   relPeriodo:7           // dias considerados na coluna/relatório de concluídas (0 = tudo)
 };
 
@@ -47,12 +49,12 @@ function fmtDateTime(iso){
 function fmtDate(iso){
   try{ return new Date(iso).toLocaleDateString('pt-BR'); }catch(e){ return ''; }
 }
-function toast(msg){
+function toast(msg, ms){
   var t = qs('#toast');
   t.textContent = msg;
   t.classList.add('show');
   clearTimeout(toast._h);
-  toast._h = setTimeout(function(){ t.classList.remove('show'); }, 2400);
+  toast._h = setTimeout(function(){ t.classList.remove('show'); }, ms || 2400);
 }
 function norm(s){
   return (s||'').toString().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'');
@@ -87,6 +89,7 @@ function allItemsArray(){
       codigo: cod,
       produto: it.produto,
       categoria: it.categoria,
+      familia: familyOf(it.produto, it.categoria),
       qtdAnual: it.qtdAnual||0,
       estoqueAtual: atual,
       localizacao: it.localizacao||'',
@@ -177,6 +180,8 @@ function finishBoot(){
   qs('#login').classList.add('hidden');
   qs('#app').classList.remove('hidden');
   renderContent();
+  var at = famAtrasadas();
+  if(at.length){ toast('⚠ ' + at.length + (at.length > 1 ? ' famílias sem verificação' : ' família sem verificação') + ' há mais de 2 dias: ' + at.map(function(f){return f.nome;}).join(', '), 6500); }
 }
 
 function startData(){
@@ -332,6 +337,7 @@ async function startProductionOrder(it){
     var min = computeMin(it.qtdAnual||0);
     var deficit = Math.max(0, min - (it.estoqueAtual||0));
     await FB.startOrder(it.codigo, deficit);
+    markVerified(familyOf(it.produto, it.categoria), true);
     toast('Produção de "'+it.produto+'" disparada.');
   }catch(e){ console.error(e); toast('Erro ao iniciar produção: ' + friendlyError(e)); }
 }
@@ -341,6 +347,7 @@ async function cancelProductionOrder(it){
   if(!orderId) return;
   try{
     await FB.cancelOrder(orderId);
+    markVerified(familyOf(it.produto, it.categoria), true);
     toast('Produção de "'+it.produto+'" cancelada.');
   }catch(e){ console.error(e); toast('Erro ao cancelar: ' + friendlyError(e)); }
 }
@@ -350,6 +357,7 @@ async function concludeProductionOrder(it, quantidade, registrarEntrada){
   if(!orderId){ toast('Essa ordem não foi encontrada.'); return; }
   try{
     await FB.concludeOrder(orderId, quantidade, !!registrarEntrada);
+    markVerified(familyOf(it.produto, it.categoria), true);
     toast('Produção de "'+it.produto+'" concluída: '+fmtInt(quantidade)+' un.');
   }catch(e){ console.error(e); toast('Erro ao concluir: ' + friendlyError(e)); }
 }
@@ -358,9 +366,10 @@ function renderCurrentTab(){ if(state.ready) renderContent(); }
 
 function setTab(tab){
   state.tab = tab;
+  if(tab === 'producao') state.prodFamily = null;
   qsa('.navbtn').forEach(function(b){ b.classList.toggle('active', b.dataset.tab === tab); });
   var sub = {
-    painel:'Painel de controle', mov:'Entradas e saídas', producao:'Lista de produção', config:'Configurações'
+    painel:'Painel de controle', mov:'Entradas e saídas', producao:'Lista de produção', gestao:'Gerenciamento diário', config:'Configurações'
   };
   qs('#topbar-sub').textContent = sub[tab] || '';
   renderContent();
@@ -374,7 +383,9 @@ function renderContent(){
   if(state.tab === 'painel') c.appendChild(renderPainel());
   else if(state.tab === 'mov') c.appendChild(renderMov());
   else if(state.tab === 'producao') c.appendChild(renderProducao());
+  else if(state.tab === 'gestao') c.appendChild(renderGestao());
   else if(state.tab === 'config') c.appendChild(renderConfig());
+  updateBadges();
 }
 
 /* ----------------------- PAINEL (Kanban) ----------------------- */
@@ -384,6 +395,7 @@ function renderPainel(){
   var counts = { critico:0, baixo:0, ok:0 };
   all.forEach(function(it){ counts[it.status]++; });
 
+  var _al = alertaFamilias(); if(_al) wrap.appendChild(_al);
   wrap.appendChild(el(
     '<div class="section-head">'+
       '<div><h1>Painel de estoque</h1><p>'+all.length+' itens no catálogo</p></div>'+
@@ -405,7 +417,7 @@ function renderPainel(){
   });
   wrap.appendChild(search);
 
-  var chips = el('<div class="chiprow"></div>');
+  var chips = el('<div class="chiprow" style="flex-wrap:wrap;overflow:visible"></div>');
   [
     ['todos','Todos', all.length, 'var(--ink-soft)'],
     ['critico','Crítico', counts.critico, 'var(--crit)'],
@@ -697,8 +709,10 @@ function renderMov(){
 var _sortableInstances = [];
 
 function renderProducao(){
+  if(state.prodFamily === null) return renderFamilias();
   var wrap = el('<div></div>');
-  var all = allItemsArray();
+  var famSel = state.prodFamily;
+  var all = allItemsArray().filter(function(it){ return famSel === '*' || it.familia === famSel; });
 
   var toProduce = all.filter(function(it){ return it.status !== 'ok' && !it.emProducao; });
   toProduce.sort(function(a,b){
@@ -709,14 +723,12 @@ function renderProducao(){
   inProduction.sort(function(a,b){ return a.produto.localeCompare(b.produto,'pt-BR'); });
 
   var days = periodDays();
-  var doneOrders = state.orders.filter(function(o){ return o.status==='concluida' && withinPeriod(o.concluidoEm, days); });
+  var doneOrders = state.orders.filter(function(o){ return o.status==='concluida' && withinPeriod(o.concluidoEm, days) && (famSel === '*' || familyOf(o.produto, o.categoria) === famSel); });
   doneOrders.sort(function(a,b){ return new Date(b.concluidoEm) - new Date(a.concluidoEm); });
 
   var exportList = toProduce.concat(inProduction);
 
-  wrap.appendChild(el(
-    '<div class="section-head"><div><h1>Kanban de produção</h1><p>Arraste um item para "Em produção" e depois conclua para registrar a quantidade feita</p></div></div>'
-  ));
+  wrap.appendChild(famHeader());
 
   var toolbar = el(
     '<div class="toolbar">'+
@@ -1241,47 +1253,493 @@ function renderCfgParametros(){
   return wrap;
 }
 
+/* ----------------------- FAMÍLIAS DE PRODUTOS ----------------------- */
+// Família = como os produtos já são escritos: "CAIXA 10 LITROS", "POTE 1,5 LITROS", "PICOLE"...
+var FAM_DIRETAS = { PICOLE:1, EXTRUSADO:1, PALETA:1 };
+var FAM_SIZE_RE = /^(.*?\b\d+(?:[,.]\d+)?\s*(?:LITROS?|LTS?|L|ML)\b)/;
+var FAM_LIMITE_HORAS = 48;   // "mais de 2 dias" sem verificar = alerta
+
+function stdText(s){ return String(s||'').toUpperCase().replace(/\s+/g,' ').trim(); }
+function famFirstWord(nome){ return stdText(nome).split(' ')[0] || ''; }
+function familyOf(produto, categoria){
+  var nome = stdText(produto);
+  var cat = stdText(categoria) || famFirstWord(nome);
+  if(cat === 'CAIXA' || cat === 'POTE'){
+    var m = FAM_SIZE_RE.exec(nome);
+    if(m) return m[1].replace(/(\d)\s*ML$/, '$1 ML');
+    return cat;
+  }
+  if(FAM_DIRETAS[cat]) return cat;
+  return 'OUTROS';
+}
+function famSlug(f){ return norm(f).replace(/[^a-z0-9]+/g,'_').replace(/^_+|_+$/g,''); }
+function dayStart(d){ var x = new Date(d); x.setHours(0,0,0,0); return x; }
+
+function familiesInfo(){
+  var map = {};
+  var verif = (state.params && state.params.verificacoes) || {};
+  allItemsArray().forEach(function(it){
+    var f = it.familia;
+    var o = map[f] || (map[f] = { nome:f, slug:famSlug(f), itens:0, aProduzir:0, emProducao:0, criticos:0, baixos:0, ok:0 });
+    o.itens++;
+    if(it.status === 'critico') o.criticos++; else if(it.status === 'baixo') o.baixos++; else o.ok++;
+    if(it.emProducao) o.emProducao++; else if(it.status !== 'ok') o.aProduzir++;
+  });
+  var now = Date.now();
+  return Object.keys(map).map(function(k){
+    var o = map[k];
+    o.ultima = verif[o.slug] || null;
+    o.horas = o.ultima ? (now - new Date(o.ultima).getTime())/3600000 : null;
+    o.atrasada = (o.horas === null) || o.horas > FAM_LIMITE_HORAS;
+    return o;
+  }).sort(function(a,b){
+    if(a.nome==='OUTROS') return 1; if(b.nome==='OUTROS') return -1;
+    return a.nome.localeCompare(b.nome,'pt-BR',{numeric:true});
+  });
+}
+function verifTexto(o){
+  if(!o.ultima) return '⚠ Nunca verificada';
+  if(o.atrasada) return '⚠ Não verificada há ' + Math.floor(o.horas/24) + ' dias';
+  var d = new Date(o.ultima);
+  var dd = Math.round((dayStart(new Date()) - dayStart(d)) / 86400000);
+  var hh = d.toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'});
+  return '✓ Verificada ' + (dd <= 0 ? 'hoje às ' + hh : dd === 1 ? 'ontem às ' + hh : 'há ' + dd + ' dias');
+}
+function famAtrasadas(){ return familiesInfo().filter(function(f){ return f.atrasada && f.itens > 0; }); }
+
+function markVerified(famNome, silent){
+  var slug = famSlug(famNome), iso = nowIso();
+  var v = Object.assign({}, (state.params && state.params.verificacoes) || {});
+  v[slug] = iso;
+  state.params.verificacoes = v;
+  var patch = { verificacoes:{} }; patch.verificacoes[slug] = iso;
+  FB.saveParams(patch).catch(function(e){
+    console.error(e);
+    if(!silent) toast('Não deu para salvar a verificação: ' + friendlyError(e));
+  });
+  updateBadges();
+  if(!silent){ toast('Família "' + famNome + '" marcada como verificada.'); renderCurrentTab(); }
+}
+function familyOfCodigo(codigo){
+  var it = state.items[codigo];
+  return it ? familyOf(it.produto, it.categoria) : null;
+}
+
+function updateBadges(){
+  var n = state.ready ? famAtrasadas().length : 0;
+  qsa('.navbtn[data-tab="producao"]').forEach(function(b){
+    var d = b.querySelector('.navdot');
+    if(!d){ d = document.createElement('i'); d.className = 'navdot'; b.appendChild(d); }
+    d.classList.toggle('hidden', n === 0);
+    d.title = n + ' família(s) sem verificação há mais de 2 dias';
+  });
+}
+
+function alertaFamilias(){
+  var at = famAtrasadas();
+  if(!at.length) return null;
+  var box = el(
+    '<div class="alertbar"><div><b>⚠ ' + at.length + (at.length > 1 ? ' famílias sem verificação' : ' família sem verificação') + ' há mais de 2 dias</b>' +
+    '<span>' + at.map(function(f){ return escapeHtml(f.nome); }).join(' · ') + '</span></div>' +
+    '<button class="btn btn-sm alertbar__btn" type="button">Ver famílias</button></div>'
+  );
+  box.querySelector('button').addEventListener('click', function(){ setTab('producao'); });
+  return box;
+}
+
+/* ----------------------- PRODUÇÃO: escolher a família ----------------------- */
+function renderFamilias(){
+  var wrap = el('<div></div>');
+  wrap.appendChild(el('<div class="section-head"><div><h1>Produção</h1><p>Escolha a família de produtos para abrir o kanban</p></div></div>'));
+  var fams = familiesInfo();
+  var at = fams.filter(function(f){ return f.atrasada; });
+  if(at.length){
+    wrap.appendChild(el(
+      '<div class="alertbar"><div><b>⚠ ' + at.length + (at.length > 1 ? ' famílias sem verificação' : ' família sem verificação') + ' há mais de 2 dias</b>' +
+      '<span>' + at.map(function(f){ return escapeHtml(f.nome); }).join(' · ') + '</span></div></div>'
+    ));
+  }
+  var ordem = fams.slice().sort(function(a,b){
+    if(a.atrasada !== b.atrasada) return a.atrasada ? -1 : 1;
+    if(a.criticos !== b.criticos) return b.criticos - a.criticos;
+    return a.nome.localeCompare(b.nome,'pt-BR',{numeric:true});
+  });
+  var grid = el('<div class="famgrid"></div>');
+  var tot = fams.reduce(function(s,f){ s.a += f.aProduzir; s.e += f.emProducao; s.c += f.criticos; return s; }, {a:0,e:0,c:0});
+  var todas = el(
+    '<button class="famcard famcard--all" type="button" data-fam="*">' +
+      '<b class="famcard__name">Todas as famílias</b>' +
+      '<div class="famcard__nums"><span><b>' + tot.a + '</b> a produzir</span><span><b>' + tot.e + '</b> em produção</span></div>' +
+      '<div class="famcard__verif">Visão geral de todos os itens</div>' +
+    '</button>'
+  );
+  grid.appendChild(todas);
+  ordem.forEach(function(f){
+    var c = el(
+      '<button class="famcard' + (f.atrasada ? ' famcard--late' : '') + '" type="button" data-fam="' + escapeHtml(f.nome) + '">' +
+        '<b class="famcard__name">' + escapeHtml(f.nome) + '</b>' +
+        '<div class="famcard__nums">' +
+          '<span><b>' + f.aProduzir + '</b> a produzir</span>' +
+          '<span><b>' + f.emProducao + '</b> em produção</span>' +
+          (f.criticos ? '<span class="famcard__crit"><b>' + f.criticos + '</b> crítico' + (f.criticos > 1 ? 's' : '') + '</span>' : '') +
+        '</div>' +
+        '<div class="famcard__verif">' + verifTexto(f) + '</div>' +
+      '</button>'
+    );
+    grid.appendChild(c);
+  });
+  qsa('.famcard', grid).forEach(function(b){
+    b.addEventListener('click', function(){ state.prodFamily = b.dataset.fam; renderContent(); window.scrollTo(0,0); });
+  });
+  wrap.appendChild(grid);
+  return wrap;
+}
+
+function famHeader(){
+  var fam = state.prodFamily;
+  var box = el('<div class="famhead"></div>');
+  var top = el('<div class="famhead__top"><button class="btn btn-outline btn-sm" id="fam-back" type="button">← Famílias</button></div>');
+  top.querySelector('#fam-back').addEventListener('click', function(){ state.prodFamily = null; renderContent(); window.scrollTo(0,0); });
+  box.appendChild(top);
+  box.appendChild(el('<div class="section-head"><div><h1>Kanban' + (fam === '*' ? ' · todas as famílias' : ' · ' + escapeHtml(fam)) + '</h1><p>Arraste um item para "Em produção" e depois conclua para registrar a quantidade feita</p></div></div>'));
+  if(fam !== '*'){
+    var info = familiesInfo().filter(function(f){ return f.nome === fam; })[0];
+    if(info){
+      var v = el(
+        '<div class="verif ' + (info.atrasada ? 'verif--late' : 'verif--ok') + '">' +
+          '<span>' + verifTexto(info) + '</span>' +
+          '<button class="btn btn-primary btn-sm" id="fam-verif" type="button">✓ Marcar como verificada agora</button>' +
+        '</div>'
+      );
+      v.querySelector('#fam-verif').addEventListener('click', function(){ markVerified(fam, false); });
+      box.appendChild(v);
+    }
+  }
+  return box;
+}
+
+/* ----------------------- GERENCIAMENTO DIÁRIO ----------------------- */
+function dayKey(d){
+  var x = new Date(d);
+  return x.getFullYear() + '-' + ('0'+(x.getMonth()+1)).slice(-2) + '-' + ('0'+x.getDate()).slice(-2);
+}
+function gestRange(){
+  var g = state.gest, today = dayStart(new Date()), s, e;
+  var addDays = function(d,n){ var x = new Date(d); x.setDate(x.getDate()+n); return x; };
+  if(g.periodo === 'hoje'){ s = today; e = addDays(today,1); }
+  else if(g.periodo === 'ontem'){ s = addDays(today,-1); e = today; }
+  else if(g.periodo === '7'){ s = addDays(today,-6); e = addDays(today,1); }
+  else if(g.periodo === '30'){ s = addDays(today,-29); e = addDays(today,1); }
+  else {
+    s = g.de ? new Date(g.de + 'T00:00:00') : today;
+    var ate = g.ate ? new Date(g.ate + 'T00:00:00') : s;
+    e = addDays(ate,1);
+    if(e <= s) e = addDays(s,1);
+  }
+  return { s:s, e:e };
+}
+function gestPeriodoTexto(R){
+  var fim = new Date(R.e.getTime() - 1);
+  if(dayKey(R.s) === dayKey(fim)) return R.s.toLocaleDateString('pt-BR');
+  return R.s.toLocaleDateString('pt-BR') + ' a ' + fim.toLocaleDateString('pt-BR');
+}
+function fmtDur(h){
+  if(h < 1) return Math.max(1, Math.round(h*60)) + ' min';
+  if(h < 48) return (Math.round(h*10)/10).toLocaleString('pt-BR') + ' h';
+  return (Math.round(h/24*10)/10).toLocaleString('pt-BR') + ' dias';
+}
+function sumBy(arr, fn){ return arr.reduce(function(s,x){ return s + (fn(x)||0); }, 0); }
+
+function gestData(){
+  var g = state.gest, R = gestRange();
+  var t0 = R.s.getTime(), t1 = R.e.getTime();
+  function inR(iso){ if(!iso) return false; var t = new Date(iso).getTime(); return t >= t0 && t < t1; }
+  function famMov(m){ var it = state.items[m.codigo]; return familyOf(m.produto, it ? it.categoria : ''); }
+  function famOk(n){ return g.fam === '*' || n === g.fam; }
+
+  var doneAll = state.orders.filter(function(o){ return o.status === 'concluida' && inR(o.concluidoEm); });
+  var done = doneAll.filter(function(o){ return famOk(familyOf(o.produto, o.categoria)); });
+  var created = state.orders.filter(function(o){ return inR(o.criadoEm) && famOk(familyOf(o.produto, o.categoria)); });
+  var movs = state.movements.filter(function(m){ return inR(m.timestamp) && famOk(famMov(m)); });
+
+  var prodTotal = sumBy(done, function(o){ return o.quantidadeProduzida; });
+  var comAlvo = done.filter(function(o){ return (o.quantidadeAlvo||0) > 0; });
+  var cumpr = comAlvo.length ? sumBy(comAlvo, function(o){ return o.quantidadeProduzida; }) / sumBy(comAlvo, function(o){ return o.quantidadeAlvo; }) * 100 : null;
+  var tempos = done.map(function(o){ return (new Date(o.concluidoEm) - new Date(o.criadoEm))/3600000; }).filter(function(h){ return h >= 0 && isFinite(h); });
+  var tempoMedio = tempos.length ? sumBy(tempos, function(h){ return h; }) / tempos.length : null;
+  var entradas = sumBy(movs.filter(function(m){ return m.tipo === 'entrada'; }), function(m){ return m.quantidade; });
+  var saidas = sumBy(movs.filter(function(m){ return m.tipo === 'saida'; }), function(m){ return m.quantidade; });
+
+  var itens = allItemsArray().filter(function(it){ return famOk(it.familia); });
+  var criticosAgora = itens.filter(function(i){ return i.status === 'critico'; }).length;
+  var baixosAgora = itens.filter(function(i){ return i.status === 'baixo'; }).length;
+  var emProdAgora = itens.filter(function(i){ return i.emProducao; }).length;
+
+  var dias = [], idx = {};
+  for(var d = new Date(R.s); d < R.e && dias.length < 92; d.setDate(d.getDate()+1)){
+    var k = dayKey(d); var o = { k:k, d:new Date(d), prod:0, ordens:0, ent:0, sai:0 };
+    dias.push(o); idx[k] = o;
+  }
+  done.forEach(function(o){ var r = idx[dayKey(o.concluidoEm)]; if(r){ r.prod += (o.quantidadeProduzida||0); r.ordens++; } });
+  movs.forEach(function(m){ var r = idx[dayKey(m.timestamp)]; if(r){ if(m.tipo === 'entrada') r.ent += m.quantidade; else r.sai += m.quantidade; } });
+
+  var porFam = {};
+  doneAll.forEach(function(o){
+    var f = familyOf(o.produto, o.categoria);
+    var r = porFam[f] || (porFam[f] = { prod:0, ordens:0 });
+    r.prod += (o.quantidadeProduzida||0); r.ordens++;
+  });
+  var porProd = {};
+  done.forEach(function(o){
+    var r = porProd[o.codigo] || (porProd[o.codigo] = { produto:o.produto, prod:0, ordens:0 });
+    r.prod += (o.quantidadeProduzida||0); r.ordens++;
+  });
+  var top = Object.keys(porProd).map(function(k){ return porProd[k]; }).sort(function(a,b){ return b.prod - a.prod; }).slice(0,8);
+
+  return { R:R, done:done, created:created, movs:movs, prodTotal:prodTotal, cumpr:cumpr, tempoMedio:tempoMedio,
+           entradas:entradas, saidas:saidas, criticosAgora:criticosAgora, baixosAgora:baixosAgora, emProdAgora:emProdAgora,
+           dias:dias, porFam:porFam, top:top };
+}
+
+function renderGestao(){
+  var g = state.gest;
+  var D = gestData();
+  var fams = familiesInfo();
+  var wrap = el('<div></div>');
+  wrap.appendChild(el('<div class="section-head"><div><h1>Gerenciamento diário</h1><p>O que foi feito, dia a dia e por família · ' + gestPeriodoTexto(D.R) + '</p></div></div>'));
+
+  // filtros
+  var chips = el('<div class="chiprow"></div>');
+  [['hoje','Hoje'],['ontem','Ontem'],['7','Últimos 7 dias'],['30','Últimos 30 dias'],['custom','Personalizado']].forEach(function(p){
+    var c = el('<button class="chip gchip' + (g.periodo === p[0] ? ' active' : '') + '" type="button" data-p="' + p[0] + '">' + p[1] + '</button>');
+    c.addEventListener('click', function(){ g.periodo = p[0]; renderContent(); });
+    chips.appendChild(c);
+  });
+  wrap.appendChild(chips);
+  var bar = el('<div class="gest-filtros"></div>');
+  var sel = el('<label class="gfield"><span>Família</span><select id="g-fam"><option value="*">Todas as famílias</option>' +
+    fams.map(function(f){ return '<option value="' + escapeHtml(f.nome) + '"' + (g.fam === f.nome ? ' selected' : '') + '>' + escapeHtml(f.nome) + '</option>'; }).join('') + '</select></label>');
+  sel.querySelector('select').addEventListener('change', function(e){ g.fam = e.target.value; renderContent(); });
+  bar.appendChild(sel);
+  if(g.periodo === 'custom'){
+    var de = el('<label class="gfield"><span>De</span><input type="date" id="g-de" value="' + (g.de || dayKey(D.R.s)) + '"></label>');
+    var ate = el('<label class="gfield"><span>Até</span><input type="date" id="g-ate" value="' + (g.ate || dayKey(new Date(D.R.e.getTime()-1))) + '"></label>');
+    de.querySelector('input').addEventListener('change', function(e){ g.de = e.target.value; if(!g.ate) g.ate = e.target.value; renderContent(); });
+    ate.querySelector('input').addEventListener('change', function(e){ g.ate = e.target.value; if(!g.de) g.de = e.target.value; renderContent(); });
+    bar.appendChild(de); bar.appendChild(ate);
+  }
+  var exp = el('<button class="btn btn-outline btn-sm" id="g-xls" type="button">Exportar Excel</button>');
+  exp.addEventListener('click', function(){ exportGestaoXLS(D); });
+  bar.appendChild(exp);
+  wrap.appendChild(bar);
+
+  // indicadores
+  function kpi(valor, rotulo, sub, cls){
+    return '<div class="gk ' + (cls||'') + '"><b>' + valor + '</b><span>' + rotulo + '</span>' + (sub ? '<small>' + sub + '</small>' : '') + '</div>';
+  }
+  var kp = el('<div class="gk-grid">' +
+    kpi(fmtInt(D.prodTotal), 'Unidades produzidas', D.done.length + (D.done.length === 1 ? ' ordem concluída' : ' ordens concluídas'), 'gk--main') +
+    kpi(D.created.length, 'Ordens disparadas', 'no período') +
+    kpi(D.cumpr === null ? '—' : Math.round(D.cumpr) + '%', 'Cumprimento do planejado', 'produzido ÷ quantidade sugerida') +
+    kpi(D.tempoMedio === null ? '—' : fmtDur(D.tempoMedio), 'Tempo médio por ordem', 'do disparo à conclusão') +
+    kpi(fmtInt(D.entradas), 'Entradas no estoque', 'unidades no período') +
+    kpi(fmtInt(D.saidas), 'Saídas do estoque', 'unidades no período') +
+    kpi(D.criticosAgora, 'Itens críticos agora', D.baixosAgora + ' baixos', D.criticosAgora ? 'gk--crit' : '') +
+    kpi(D.emProdAgora, 'Em produção agora', 'neste momento') +
+  '</div>');
+  wrap.appendChild(kp);
+
+  // gráfico por dia
+  if(D.dias.length > 1){
+    var max = Math.max.apply(null, D.dias.map(function(x){ return x.prod; }).concat([1]));
+    var passo = D.dias.length > 16 ? Math.ceil(D.dias.length / 12) : 1;
+    var bars = D.dias.map(function(x, i){
+      var h = Math.round(x.prod / max * 100);
+      var rot = (i % passo === 0) ? ('0'+x.d.getDate()).slice(-2) + '/' + ('0'+(x.d.getMonth()+1)).slice(-2) : '';
+      return '<div class="gbar" title="' + x.d.toLocaleDateString('pt-BR') + ': ' + fmtInt(x.prod) + ' un. em ' + x.ordens + ' ordem(ns)">' +
+               '<em>' + (x.prod ? fmtInt(x.prod) : '') + '</em><div class="gbar__col"><i style="height:' + Math.max(h, x.prod ? 4 : 0) + '%"></i></div><span>' + rot + '</span></div>';
+    }).join('');
+    wrap.appendChild(el('<div class="card gest-card"><h3>Produção por dia (unidades)</h3><div class="gbars">' + bars + '</div></div>'));
+  }
+
+  // por família
+  var linhas = fams.map(function(f){
+    var r = D.porFam[f.nome] || { prod:0, ordens:0 };
+    return { f:f, prod:r.prod, ordens:r.ordens };
+  }).sort(function(a,b){ return b.prod - a.prod || a.f.nome.localeCompare(b.f.nome,'pt-BR',{numeric:true}); });
+  var maxF = Math.max.apply(null, linhas.map(function(x){ return x.prod; }).concat([1]));
+  var totF = sumBy(linhas, function(x){ return x.prod; });
+  var tb = linhas.map(function(x){
+    var f = x.f, p = f.itens ? 100 / f.itens : 0;
+    return '<tr class="' + (g.fam === f.nome ? 'sel' : '') + '" data-fam="' + escapeHtml(f.nome) + '">' +
+      '<td class="gfam"><b>' + escapeHtml(f.nome) + '</b><div class="gmini"><i style="width:' + Math.round(x.prod / maxF * 100) + '%"></i></div></td>' +
+      '<td class="num"><b>' + fmtInt(x.prod) + '</b><small>' + (totF ? Math.round(x.prod / totF * 100) : 0) + '%</small></td>' +
+      '<td class="num">' + x.ordens + '</td>' +
+      '<td class="gstk"><div class="stk" title="' + f.criticos + ' críticos, ' + f.baixos + ' baixos, ' + f.ok + ' em dia">' +
+        '<i style="width:' + f.criticos * p + '%;background:var(--crit)"></i><i style="width:' + f.baixos * p + '%;background:var(--pink)"></i><i style="width:' + f.ok * p + '%;background:var(--teal)"></i></div>' +
+        '<small>' + f.criticos + ' crít. · ' + f.baixos + ' baixos</small></td>' +
+      '<td class="gv ' + (f.atrasada ? 'late' : '') + '">' + verifTexto(f).replace('Não verificada há', 'Sem verificar há') + '</td></tr>';
+  }).join('');
+  var fc = el('<div class="card gest-card"><h3>Por família <small>(toque numa linha para filtrar)</small></h3>' +
+    '<div class="gscroll"><table class="gtab"><thead><tr><th>Família</th><th class="num">Produzido</th><th class="num">Ordens</th><th>Situação do estoque</th><th>Verificação</th></tr></thead><tbody>' + tb + '</tbody></table></div></div>');
+  qsa('tbody tr', fc).forEach(function(tr){
+    tr.addEventListener('click', function(){ g.fam = (g.fam === tr.dataset.fam) ? '*' : tr.dataset.fam; renderContent(); });
+  });
+  wrap.appendChild(fc);
+
+  // top produtos
+  if(D.top.length){
+    var mx = D.top[0].prod || 1;
+    wrap.appendChild(el('<div class="card gest-card"><h3>Produtos mais produzidos</h3>' + D.top.map(function(t){
+      return '<div class="gtop"><span>' + escapeHtml(t.produto) + ' <small>(' + t.ordens + ' ordem' + (t.ordens > 1 ? 's' : '') + ')</small></span><b>' + fmtInt(t.prod) + '</b>' +
+             '<div class="gmini"><i style="width:' + Math.round(t.prod / mx * 100) + '%"></i></div></div>';
+    }).join('') + '</div>'));
+  }
+
+  // dia a dia
+  if(D.dias.length > 1){
+    var rows = D.dias.slice().reverse().map(function(x){
+      return '<tr><td>' + x.d.toLocaleDateString('pt-BR',{weekday:'short', day:'2-digit', month:'2-digit'}) + '</td><td class="num">' + x.ordens + '</td><td class="num"><b>' + fmtInt(x.prod) + '</b></td><td class="num">' + fmtInt(x.ent) + '</td><td class="num">' + fmtInt(x.sai) + '</td></tr>';
+    }).join('');
+    wrap.appendChild(el('<div class="card gest-card"><h3>Dia a dia</h3><div class="gscroll"><table class="gtab"><thead><tr><th>Dia</th><th class="num">Ordens</th><th class="num">Produzido</th><th class="num">Entradas</th><th class="num">Saídas</th></tr></thead><tbody>' + rows + '</tbody></table></div></div>'));
+  }
+
+  // ordens concluídas
+  var lista = D.done.slice().sort(function(a,b){ return new Date(b.concluidoEm) - new Date(a.concluidoEm); }).slice(0, 40);
+  wrap.appendChild(el('<div class="card gest-card"><h3>O que foi concluído' + (D.done.length > 40 ? ' <small>(40 mais recentes)</small>' : '') + '</h3>' +
+    (lista.length ? lista.map(function(o){
+      return '<div class="gfeed"><div><b>' + escapeHtml(o.produto) + '</b><small>' + escapeHtml(familyOf(o.produto, o.categoria)) + ' · ' + fmtDateTime(o.concluidoEm) + '</small></div>' +
+             '<span>' + fmtInt(o.quantidadeProduzida||0) + ' un.' + ((o.quantidadeAlvo||0) > 0 ? '<small>de ' + fmtInt(o.quantidadeAlvo) + '</small>' : '') + '</span></div>';
+    }).join('') : '<div class="kempty">Nenhuma produção concluída neste período.</div>') + '</div>'));
+  return wrap;
+}
+
+function exportGestaoXLS(D){
+  if(!window.XLSX){ toast('Exportação indisponível neste momento.'); return; }
+  var X = window.XLSX, wb = X.utils.book_new();
+  var g = state.gest;
+  var resumo = [
+    ['Gerenciamento diário · Sorveteria São João'],
+    ['Período', gestPeriodoTexto(D.R)],
+    ['Família', g.fam === '*' ? 'Todas' : g.fam],
+    [],
+    ['Unidades produzidas', D.prodTotal],
+    ['Ordens concluídas', D.done.length],
+    ['Ordens disparadas', D.created.length],
+    ['Cumprimento do planejado (%)', D.cumpr === null ? '' : Math.round(D.cumpr)],
+    ['Tempo médio por ordem (h)', D.tempoMedio === null ? '' : Math.round(D.tempoMedio*10)/10],
+    ['Entradas no estoque (un.)', D.entradas],
+    ['Saídas do estoque (un.)', D.saidas],
+    ['Itens críticos agora', D.criticosAgora],
+    ['Em produção agora', D.emProdAgora]
+  ];
+  X.utils.book_append_sheet(wb, X.utils.aoa_to_sheet(resumo), 'Resumo');
+  var dia = [['Dia','Ordens concluídas','Unidades produzidas','Entradas','Saídas']].concat(D.dias.map(function(x){
+    return [x.d.toLocaleDateString('pt-BR'), x.ordens, x.prod, x.ent, x.sai];
+  }));
+  X.utils.book_append_sheet(wb, X.utils.aoa_to_sheet(dia), 'Por dia');
+  var fam = [['Família','Unidades produzidas','Ordens concluídas','Itens críticos','Itens baixos','Em produção','Verificação']].concat(familiesInfo().map(function(f){
+    var r = D.porFam[f.nome] || { prod:0, ordens:0 };
+    return [f.nome, r.prod, r.ordens, f.criticos, f.baixos, f.emProducao, verifTexto(f)];
+  }));
+  X.utils.book_append_sheet(wb, X.utils.aoa_to_sheet(fam), 'Por família');
+  var ord = [['Código','Produto','Família','Quantidade sugerida','Quantidade produzida','Disparada em','Concluída em']].concat(D.done.map(function(o){
+    return [o.codigo, o.produto, familyOf(o.produto, o.categoria), o.quantidadeAlvo||0, o.quantidadeProduzida||0, fmtDateTime(o.criadoEm), fmtDateTime(o.concluidoEm)];
+  }));
+  X.utils.book_append_sheet(wb, X.utils.aoa_to_sheet(ord), 'Ordens concluídas');
+  var out = X.write(wb, {bookType:'xlsx', type:'array'});
+  offerDownload('gerenciamento_diario_' + isoDateStamp() + '.xlsx', new Blob([out], {type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}));
+}
+
+/* ----------------------- NOVO PRODUTO (nome no padrão dos cadastrados) ----------------------- */
 function renderCfgNovoProduto(){
   var wrap = el('<div></div>');
   var maxCod = 0;
-  for(var k in state.items){ var n = parseInt(k,10); if(n>maxCod) maxCod = n; }
-  var cats = Array.from(new Set(allItemsArray().map(function(it){ return it.categoria; }))).sort();
+  for(var k in state.items){ var n = parseInt(k,10); if(n > maxCod) maxCod = n; }
+  var fams = familiesInfo().map(function(f){ return f.nome; }).filter(function(n){ return n !== 'OUTROS'; });
 
   var card = el(
-    '<div class="card">'+
-      '<div class="field"><label>Código</label><input type="number" id="np-cod" value="'+(maxCod+1)+'"></div>'+
-      '<div class="field"><label>Nome do produto</label><input type="text" id="np-nome" placeholder="Ex.: POTE 1,5 LITROS PISTACHE"></div>'+
-      '<div class="field"><label>Categoria</label><input type="text" id="np-cat" list="np-cat-list" placeholder="Ex.: POTE"><datalist id="np-cat-list">'+
-        cats.map(function(c){ return '<option value="'+escapeHtml(c)+'">'; }).join('')+
-      '</datalist></div>'+
-      '<div class="grid2">'+
-        '<div class="field"><label>Qtd. produzida/ano (estimativa)</label><input type="number" id="np-qtdano" min="0" value="0"></div>'+
-        '<div class="field"><label>Estoque atual</label><input type="number" id="np-atual" min="0" value="0"></div>'+
-      '</div>'+
-      '<div class="field"><label>Localização (opcional)</label><input type="text" id="np-loc" placeholder="Ex.: Câmara 1 · Prateleira A2"></div>'+
-      '<button class="btn btn-primary btn-block" id="np-save">Adicionar produto</button>'+
+    '<div class="card">' +
+      '<div class="np-dica"><b>Padrão de escrita:</b> FAMÍLIA + SABOR, tudo em MAIÚSCULAS, como nos produtos já cadastrados. Ex.: <b>CAIXA 10 LITROS AÇAI COM NUTELLA</b></div>' +
+      '<div class="field"><label>Código</label><input type="number" id="np-cod" value="' + (maxCod+1) + '"></div>' +
+      '<div class="field"><label>Família do produto</label><select id="np-fam"><option value="">Escolha a família…</option>' +
+        fams.map(function(f){ return '<option value="' + escapeHtml(f) + '">' + escapeHtml(f) + '</option>'; }).join('') +
+        '<option value="__outro">Outro (digitar o nome completo)</option></select></div>' +
+      '<div class="field"><label id="np-nome-label">Sabor / descrição</label><input type="text" id="np-nome" placeholder="Ex.: AÇAI COM NUTELLA" autocapitalize="characters" autocomplete="off"></div>' +
+      '<div class="np-preview" id="np-preview">Nome que será cadastrado: <b>—</b></div>' +
+      '<div id="np-similares"></div>' +
+      '<div class="grid2">' +
+        '<div class="field"><label>Categoria (automática)</label><input type="text" id="np-cat" readonly></div>' +
+        '<div class="field"><label>Família no kanban</label><input type="text" id="np-famkb" readonly></div>' +
+      '</div>' +
+      '<div class="grid2">' +
+        '<div class="field"><label>Qtd. produzida/ano (estimativa)</label><input type="number" id="np-qtdano" min="0" value="0"></div>' +
+        '<div class="field"><label>Estoque atual</label><input type="number" id="np-atual" min="0" value="0"></div>' +
+      '</div>' +
+      '<div class="field"><label>Localização (opcional)</label><input type="text" id="np-loc" placeholder="Ex.: Câmara 1 · Prateleira A2"></div>' +
+      '<button class="btn btn-primary btn-block" id="np-save">Adicionar produto</button>' +
     '</div>'
   );
+
+  function nomeFinal(){
+    var fam = qs('#np-fam', card).value;
+    var desc = stdText(qs('#np-nome', card).value);
+    if(!fam) return '';
+    if(fam === '__outro') return desc;
+    if(!desc) return '';
+    if(desc.indexOf(fam + ' ') === 0) desc = desc.slice(fam.length + 1);
+    return stdText(fam + ' ' + desc);
+  }
+  function atualizar(){
+    var fam = qs('#np-fam', card).value;
+    qs('#np-nome-label', card).textContent = fam === '__outro' ? 'Nome completo do produto' : 'Sabor / descrição';
+    var nome = nomeFinal();
+    qs('#np-preview b', card).textContent = nome || '—';
+    qs('#np-cat', card).value = nome ? famFirstWord(nome) : '';
+    qs('#np-famkb', card).value = nome ? familyOf(nome, famFirstWord(nome)) : '';
+    var box = qs('#np-similares', card);
+    var desc = stdText(qs('#np-nome', card).value);
+    var palavras = norm(desc).split(' ').filter(function(w){ return w.length >= 3; });
+    var sim = [];
+    if(palavras.length){
+      sim = allItemsArray().filter(function(it){
+        var n = norm(it.produto);
+        return palavras.every(function(w){ return n.indexOf(w) > -1; });
+      }).slice(0, 6);
+    }
+    box.innerHTML = sim.length
+      ? '<div class="np-sim"><b>Já cadastrados parecidos (confira para não duplicar):</b>' + sim.map(function(it){ return '<span>#' + it.codigo + ' · ' + escapeHtml(it.produto) + '</span>'; }).join('') + '</div>'
+      : '';
+  }
+  ['#np-fam','#np-nome'].forEach(function(s){
+    var e = qs(s, card);
+    e.addEventListener('input', atualizar); e.addEventListener('change', atualizar);
+  });
+  qs('#np-nome', card).addEventListener('blur', function(){ this.value = stdText(this.value); atualizar(); });
+
   card.querySelector('#np-save').addEventListener('click', function(){
-    var codigo = parseInt(qs('#np-cod').value,10);
-    var nome = qs('#np-nome').value.trim();
-    if(!codigo || !nome){ toast('Preencha código e nome do produto.'); return; }
+    var codigo = parseInt(qs('#np-cod', card).value, 10);
+    var nome = nomeFinal();
+    if(!codigo){ toast('Informe o código do produto.'); return; }
+    if(!qs('#np-fam', card).value){ toast('Escolha a família do produto.'); return; }
+    if(!nome || nome === stdText(qs('#np-fam', card).value)){ toast('Digite o sabor ou a descrição do produto.'); return; }
     if(state.items[String(codigo)]){ toast('Já existe um produto com esse código.'); return; }
+    var igual = allItemsArray().filter(function(it){ return norm(stdText(it.produto)) === norm(nome); })[0];
+    if(igual){ toast('Esse produto já existe: #' + igual.codigo + ' ' + igual.produto); return; }
     addProduct({
       codigo: codigo,
       produto: nome,
-      categoria: (qs('#np-cat').value || 'OUTROS').toUpperCase(),
-      qtdAnual: parseFloat(qs('#np-qtdano').value)||0,
-      estoqueAtual: parseFloat(qs('#np-atual').value)||0,
-      localizacao: qs('#np-loc').value||''
+      categoria: famFirstWord(nome),
+      qtdAnual: parseFloat(qs('#np-qtdano', card).value) || 0,
+      estoqueAtual: parseFloat(qs('#np-atual', card).value) || 0,
+      localizacao: qs('#np-loc', card).value || ''
     });
-    state.cfgTab='localizacao';
+    state.cfgTab = 'localizacao';
     renderContent();
   });
   wrap.appendChild(card);
   return wrap;
 }
-
 
 /* ----------------------- primeira vez: banco vazio ----------------------- */
 function renderSetup(){
