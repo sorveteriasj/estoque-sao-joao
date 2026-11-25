@@ -181,7 +181,7 @@ function finishBoot(){
   qs('#app').classList.remove('hidden');
   renderContent();
   var at = famAtrasadas();
-  if(at.length){ toast('⚠ ' + at.length + (at.length > 1 ? ' famílias sem verificação' : ' família sem verificação') + ' há mais de 2 dias: ' + at.map(function(f){return f.nome;}).join(', '), 6500); }
+  if(at.length){ toast('⚠ Há famílias para verificar em Produção.', 5000); }
 }
 
 function startData(){
@@ -1338,11 +1338,7 @@ function updateBadges(){
 function alertaFamilias(){
   var at = famAtrasadas();
   if(!at.length) return null;
-  var box = el(
-    '<div class="alertbar"><div><b>⚠ ' + at.length + (at.length > 1 ? ' famílias sem verificação' : ' família sem verificação') + ' há mais de 2 dias</b>' +
-    '<span>' + at.map(function(f){ return escapeHtml(f.nome); }).join(' · ') + '</span></div>' +
-    '<button class="btn btn-sm alertbar__btn" type="button">Ver famílias</button></div>'
-  );
+  var box = el('<div class="alertbar"><div><b>⚠ Há famílias para verificar</b></div><button class="btn btn-sm alertbar__btn" type="button">Ver</button></div>');
   box.querySelector('button').addEventListener('click', function(){ setTab('producao'); });
   return box;
 }
@@ -1353,12 +1349,7 @@ function renderFamilias(){
   wrap.appendChild(el('<div class="section-head"><div><h1>Produção</h1><p>Escolha a família de produtos para abrir o kanban</p></div></div>'));
   var fams = familiesInfo();
   var at = fams.filter(function(f){ return f.atrasada; });
-  if(at.length){
-    wrap.appendChild(el(
-      '<div class="alertbar"><div><b>⚠ ' + at.length + (at.length > 1 ? ' famílias sem verificação' : ' família sem verificação') + ' há mais de 2 dias</b>' +
-      '<span>' + at.map(function(f){ return escapeHtml(f.nome); }).join(' · ') + '</span></div></div>'
-    ));
-  }
+  if(at.length){ wrap.appendChild(el('<div class="alertbar"><div><b>⚠ Há famílias para verificar</b></div></div>')); }
   var ordem = fams.slice().sort(function(a,b){
     if(a.atrasada !== b.atrasada) return a.atrasada ? -1 : 1;
     if(a.criticos !== b.criticos) return b.criticos - a.criticos;

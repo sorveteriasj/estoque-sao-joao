@@ -1,6 +1,7 @@
 <!doctype html>
 <html lang="pt-BR">
 <head>
+<meta name="color-scheme" content="light only">
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1">
 <title>Estoque São João</title>
@@ -44,29 +45,6 @@
   :root:not([data-theme="light"]){
     /* system dark handling below via media query */
   }
-  @media (prefers-color-scheme: dark){
-    :root:not([data-theme="light"]){
-      --cream:#1B1310;
-      --paper:#241A16;
-      --ink:#F4E9E2;
-      --ink-soft:#C9B4A8;
-      --line:#3A2A22;
-      --teal-tint:#0F2E30;
-      --pink-tint:#331924;
-      --maroon-tint:#2E1418;
-    }
-  }
-  :root[data-theme="dark"]{
-    --cream:#1B1310;
-    --paper:#241A16;
-    --ink:#F4E9E2;
-    --ink-soft:#C9B4A8;
-    --line:#3A2A22;
-    --teal-tint:#0F2E30;
-    --pink-tint:#331924;
-    --maroon-tint:#2E1418;
-  }
-
   *{box-sizing:border-box;}
   html,body{margin:0;padding:0;}
   body{
@@ -662,7 +640,7 @@
 <script src="vendor/xlsx.full.min.js"></script>
 <script src="vendor/sortable.min.js"></script>
 <script src="firebase-config.js"></script>
-<script src="fb.js"></script>
-<script src="app.js"></script>
+<script src="fb.js?v=20261125b"></script>
+<script src="app.js?v=20261125b"></script>
 </body>
 </html>
